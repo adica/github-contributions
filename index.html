@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>GitHub Contributions by Month</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 2rem;
+            background: #f9f9f9;
+        }
+
+        form {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        label {
+            display: block;
+        }
+
+        input, button {
+            margin-top: 0.5rem;
+            padding: 0.5rem;
+            font-size: 1rem;
+        }
+
+        #loader {
+            margin-top: 1rem;
+            font-weight: bold;
+            color: #007bff;
+        }
+
+        table {
+            margin-top: 2rem;
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 0.5rem;
+            text-align: center;
+        }
+
+        th {
+            background-color: #eee;
+        }
+
+        tfoot td {
+            font-weight: bold;
+            background-color: #f0f0f0;
+        }
+
+        .summary-banner {
+            margin-top: 2rem;
+            padding: 1rem 2rem;
+            background-color: #007bff;
+            color: white;
+            border-radius: 12px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 1.1rem;
+            font-weight: bold;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .summary-banner div {
+            flex: 1 1 200px;
+        }
+
+    </style>
+</head>
+<body>
+<h1>GitHub Contributions Summary</h1>
+
+<form id="contributionsForm">
+    <label>
+        GitHub Token:
+        <input type="text" id="token" required placeholder="ghp_..." />
+    </label>
+    <label>
+        From (month):
+        <input type="month" id="fromDate" required />
+    </label>
+    <label>
+        To (month):
+        <input type="month" id="toDate" required />
+    </label>
+    <button type="submit">Get Contributions</button>
+</form>
+
+<div id="loader" style="display:none;">⏳ Loading contributions...</div>
+<div id="results"></div>
+
+<script>
+    const form = document.getElementById('contributionsForm');
+    const loader = document.getElementById('loader');
+    const results = document.getElementById('results');
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        results.innerHTML = '';
+        loader.style.display = 'block';
+
+        const token = document.getElementById('token').value.trim();
+        const fromInput = document.getElementById('fromDate').value;
+        const toInput = document.getElementById('toDate').value;
+
+        if (!token || !fromInput || !toInput) return;
+
+        const fromDate = new Date(fromInput + '-01');
+        const toDate = new Date(toInput + '-01');
+        toDate.setMonth(toDate.getMonth() + 1);
+        toDate.setDate(0); // last day of selected "to" month
+
+        const yearlyRanges = splitByYear(fromDate, toDate);
+        const monthlyMap = new Map();
+
+        let totalAdditions = 0;
+        let totalDeletions = 0;
+        let totalPRs = 0;
+        let totalReviews = 0;
+
+        for (const range of yearlyRanges) {
+            try {
+                const { prs, prCount, reviewCount } = await fetchMonthlyStats(range, token);
+
+                prs.forEach(pr => {
+                    const created = new Date(pr.pullRequest.createdAt);
+                    const key = `${created.getFullYear()}-${String(created.getMonth() + 1).padStart(2, '0')}`;
+
+                    if (!monthlyMap.has(key)) {
+                        monthlyMap.set(key, {
+                            additions: 0,
+                            deletions: 0,
+                            prsOpened: 0,
+                            reviews: 0
+                        });
+                    }
+
+                    const monthData = monthlyMap.get(key);
+                    monthData.additions += pr.pullRequest.additions || 0;
+                    monthData.deletions += pr.pullRequest.deletions || 0;
+                    monthData.prsOpened += 1;
+                });
+
+                // Evenly distribute reviews by month (approximate)
+                const monthsInRange = getMonthsInRange(range.from, range.to);
+                monthsInRange.forEach(monthKey => {
+                    if (!monthlyMap.has(monthKey)) {
+                        monthlyMap.set(monthKey, {
+                            additions: 0,
+                            deletions: 0,
+                            prsOpened: 0,
+                            reviews: 0
+                        });
+                    }
+                    monthlyMap.get(monthKey).reviews += Math.floor(reviewCount / monthsInRange.length);
+                });
+
+                totalAdditions += prs.reduce((sum, pr) => sum + pr.pullRequest.additions || 0, 0);
+                totalDeletions += prs.reduce((sum, pr) => sum + pr.pullRequest.deletions || 0, 0);
+                totalPRs += prCount;
+                totalReviews += reviewCount;
+
+            } catch (err) {
+                console.error(`Error for ${range.from} - ${range.to}:`, err);
+            }
+        }
+
+        loader.style.display = 'none';
+        renderTable(monthlyMap, totalAdditions, totalDeletions, totalPRs, totalReviews, fromDate, toDate);
+    });
+
+    function getDateRangeString(fromDate, toDate) {
+        const from = new Date(fromDate);
+        const to = new Date(toDate);
+
+        let years = to.getFullYear() - from.getFullYear();
+        let months = to.getMonth() - from.getMonth();
+
+        if (months < 0) {
+            years -= 1;
+            months += 12;
+        }
+
+        const y = years > 0 ? `${years} year${years > 1 ? 's' : ''}` : '';
+        const m = months > 0 ? `${months} month${months > 1 ? 's' : ''}` : '';
+
+        return `${y}${y && m ? ' ' : ''}${m}` || '0 months';
+    }
+
+
+    function splitByYear(fromDate, toDate) {
+        const ranges = [];
+        const startYear = fromDate.getFullYear();
+        const endYear = toDate.getFullYear();
+
+        for (let year = startYear; year <= endYear; year++) {
+            let start = new Date(`${year}-01-01`);
+            let end = new Date(`${year}-12-31`);
+
+            if (year === startYear) start = fromDate;
+            if (year === endYear) end = toDate;
+
+            ranges.push({
+                from: start.toISOString().split('T')[0] + 'T00:00:00Z',
+                to: end.toISOString().split('T')[0] + 'T23:59:59Z'
+            });
+        }
+
+        return ranges;
+    }
+
+    async function fetchMonthlyStats(range, token) {
+        const query = `
+        query {
+          viewer {
+            contributionsCollection(from: "${range.from}", to: "${range.to}") {
+              pullRequestContributions(first: 100) {
+                totalCount
+                nodes {
+                  pullRequest {
+                    additions
+                    deletions
+                    createdAt
+                  }
+                }
+              }
+              pullRequestReviewContributions(first: 100) {
+                totalCount
+              }
+            }
+          }
+        }
+      `;
+
+        const res = await fetch('https://api.github.com/graphql', {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ query })
+        });
+
+        const data = await res.json();
+        const prs = data.data.viewer.contributionsCollection.pullRequestContributions.nodes || [];
+        const prCount = data.data.viewer.contributionsCollection.pullRequestContributions.totalCount || 0;
+        const reviewCount = data.data.viewer.contributionsCollection.pullRequestReviewContributions.totalCount || 0;
+
+        return { prs, prCount, reviewCount };
+    }
+
+    function getMonthsInRange(fromISO, toISO) {
+        const fromDate = new Date(fromISO);
+        const toDate = new Date(toISO);
+        const months = [];
+
+        let current = new Date(fromDate);
+        while (current <= toDate) {
+            const key = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}`;
+            months.push(key);
+            current.setMonth(current.getMonth() + 1);
+        }
+
+        return months;
+    }
+
+    function renderTable(monthlyMap, totalAdditions, totalDeletions, totalPRs, totalReviews, fromDate, toDate) {
+        results.innerHTML = ''; // clear previous results
+
+        const summary = document.createElement('div');
+        summary.className = 'summary-banner';
+        summary.innerHTML = `
+    <div>📅 Time Range: ${getDateRangeString(fromDate, toDate)}</div>
+    <div>📦 PRs Opened: <span>${totalPRs.toLocaleString()}</span></div>
+    <div>✅ Code Reviews: <span>${totalReviews.toLocaleString()}</span></div>
+    <div>➕ Additions: <span>${totalAdditions.toLocaleString()}</span></div>
+    <div>➖ Deletions: <span>${totalDeletions.toLocaleString()}</span></div>
+  `;
+
+        // ✅ Create the contributions table
+        const sortedMonths = [...monthlyMap.entries()].sort((a, b) => {
+            const dateA = new Date(a[0] + '-01');
+            const dateB = new Date(b[0] + '-01');
+            return dateA - dateB;
+        });
+
+        const table = document.createElement('table');
+        table.innerHTML = `
+    <thead>
+      <tr>
+        <th>Month</th>
+        <th>PRs Opened</th>
+        <th>Code Reviews</th>
+        <th>Additions</th>
+        <th>Deletions</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${sortedMonths.map(([month, data]) => `
+        <tr>
+          <td>${month}</td>
+          <td>${data.prsOpened}</td>
+          <td>${data.reviews}</td>
+          <td>${data.additions}</td>
+          <td>${data.deletions}</td>
+        </tr>
+      `).join('')}
+    </tbody>
+    <tfoot>
+      <tr>
+        <td>Total</td>
+        <td>${totalPRs}</td>
+        <td>${totalReviews}</td>
+        <td>${totalAdditions}</td>
+        <td>${totalDeletions}</td>
+      </tr>
+    </tfoot>
+  `;
+
+        // ✅ Add both to the page
+        results.appendChild(summary);
+        results.appendChild(table);
+    }
+</script>
+</body>
+</html>
